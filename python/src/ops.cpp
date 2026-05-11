@@ -1764,6 +1764,31 @@ void init_ops(nb::module_& m) {
             array: The array of zeros with the specified shape.
       )pbdoc");
   m.def(
+      "empty",
+      [](const nb::object& shape,
+         std::optional<mx::Dtype> dtype,
+         mx::StreamOrDevice s) {
+        auto t = dtype.value_or(mx::float32);
+        return mx::empty(to_shape(shape), t, s);
+      },
+      "shape"_a,
+      "dtype"_a.none() = mx::float32,
+      nb::kw_only(),
+      "stream"_a = nb::none(),
+      nb::sig(
+          "def empty(shape: Union[int, Sequence[int]], dtype: Optional[Dtype] = float32, *, stream: Union[None, Stream, Device] = None) -> array"),
+      R"pbdoc(
+        Construct an uninitialized array.
+
+        Args:
+            shape (int or list(int)): The shape of the output array.
+            dtype (Dtype, optional): Data type of the output array. If
+              unspecified the output type defaults to ``float32``.
+
+        Returns:
+            array: The uninitialized array with the specified shape.
+      )pbdoc");
+  m.def(
       "asarray",
       [](const nb::object& a, std::optional<mx::Dtype> dtype) {
         return create_array(a, dtype);
