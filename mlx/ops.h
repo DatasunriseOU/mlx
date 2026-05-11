@@ -91,6 +91,12 @@ inline array zeros(const Shape& shape, StreamOrDevice s = {}) {
 }
 MLX_API array zeros_like(const array& a, StreamOrDevice s = {});
 
+/** Allocate an array of the given shape without initializing its contents. */
+MLX_API array empty(const Shape& shape, Dtype dtype, StreamOrDevice s = {});
+inline array empty(const Shape& shape, StreamOrDevice s = {}) {
+  return empty(shape, float32, s);
+}
+
 /** Fill an array of the given shape with ones. */
 MLX_API array ones(const Shape& shape, Dtype dtype, StreamOrDevice s = {});
 inline array ones(const Shape& shape, StreamOrDevice s = {}) {

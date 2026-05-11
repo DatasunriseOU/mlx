@@ -335,6 +335,25 @@ array zeros_like(const array& a, StreamOrDevice s /* = {} */) {
   return full_like(a, 0, a.dtype(), to_stream(s));
 }
 
+array empty(const Shape& shape, Dtype dtype, StreamOrDevice s /* = {} */) {
+  auto stream = to_stream(s);
+  if (stream.device == Device::gpu && dtype == float64) {
+    throw std::invalid_argument("[empty] Does not support float64 on GPU.");
+  }
+  size_t size = 1;
+  for (auto dim : shape) {
+    if (dim < 0) {
+      std::ostringstream msg;
+      msg << "[empty] Received invalid shape with negative dimension " << dim
+          << ".";
+      throw std::invalid_argument(msg.str());
+    }
+    size *= static_cast<size_t>(dim);
+  }
+  array out(allocator::malloc(size * size_of(dtype)), shape, dtype);
+  return out;
+}
+
 array ones(const Shape& shape, Dtype dtype, StreamOrDevice s /* = {} */) {
   return full(shape, array(1, dtype), to_stream(s));
 }

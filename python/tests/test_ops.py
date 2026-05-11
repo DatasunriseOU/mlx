@@ -73,11 +73,21 @@ class TestOps(mlx_tests.MLXTestCase):
         self.assertEqual(x.shape, (2,))
         self.assertEqual(x.tolist(), [0.0, 0.0])
 
+        x = mx.empty(2)
+        self.assertEqual(x.dtype, mx.float32)
+        self.assertEqual(x.shape, (2,))
+        mx.eval(x)
+
         x = mx.ones(2)
         self.assertEqual(x.shape, (2,))
         self.assertEqual(x.tolist(), [1.0, 1.0])
 
         for t in [mx.bool_, mx.int32, mx.float32]:
+            x = mx.empty([2, 2], t)
+            self.assertEqual(x.dtype, t)
+            self.assertEqual(x.shape, (2, 2))
+            mx.eval(x)
+
             x = mx.zeros([2, 2], t)
             self.assertEqual(x.dtype, t)
             self.assertTrue(mx.array_equal(x, mx.array([[0, 0], [0, 0]])))
