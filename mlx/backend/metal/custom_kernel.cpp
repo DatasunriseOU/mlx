@@ -179,10 +179,17 @@ CustomKernelFunction metal_kernel(
     const std::string& source,
     const std::string& header /* = "" */,
     bool ensure_row_contiguous /* = true */,
-    bool atomic_outputs /* = false */) {
+    bool atomic_outputs /* = false */,
+    const std::vector<int>& output_to_input_aliases /* = {} */) {
   if (output_names.empty()) {
     throw std::invalid_argument(
         "[metal_kernel] Must specify at least one output.");
+  }
+  if (!output_to_input_aliases.empty() &&
+      output_to_input_aliases.size() != output_names.size()) {
+    throw std::invalid_argument(
+        "[metal_kernel] `output_to_input_aliases` must be empty or have one "
+        "entry per output.");
   }
   std::vector<std::tuple<bool, bool, bool>> shape_infos;
   for (auto& n : input_names) {
@@ -224,7 +231,8 @@ CustomKernelFunction metal_kernel(
 
   return [=,
           shape_infos = std::move(shape_infos),
-          attributes = std::move(attributes)](
+          attributes = std::move(attributes),
+          output_to_input_aliases = output_to_input_aliases](
              const std::vector<array>& inputs,
              const std::vector<Shape>& output_shapes,
              const std::vector<Dtype>& output_dtypes,
@@ -255,6 +263,48 @@ CustomKernelFunction metal_kernel(
           << output_names.size() << " but got size " << output_dtypes.size()
           << "." << std::endl;
       throw std::invalid_argument(msg.str());
+    }
+    for (size_t i = 0; i < output_to_input_aliases.size(); ++i) {
+      int alias = output_to_input_aliases[i];
+      if (alias < 0) {
+        continue;
+      }
+      if (static_cast<size_t>(alias) >= inputs.size()) {
+        std::ostringstream msg;
+        msg << "[metal_kernel] Output alias for output " << i
+            << " points to input " << alias << " but only " << inputs.size()
+            << " inputs were provided." << std::endl;
+        throw std::invalid_argument(msg.str());
+      }
+      for (size_t j = 0; j < i; ++j) {
+        if (output_to_input_aliases[j] == alias) {
+          std::ostringstream msg;
+          msg << "[metal_kernel] Multiple outputs cannot alias input " << alias
+              << "." << std::endl;
+          throw std::invalid_argument(msg.str());
+        }
+      }
+      const auto& aliased_input = inputs[static_cast<size_t>(alias)];
+      if (output_shapes[i] != aliased_input.shape()) {
+        std::ostringstream msg;
+        msg << "[metal_kernel] Output " << i
+            << " aliases an input with a different shape." << std::endl;
+        throw std::invalid_argument(msg.str());
+      }
+      if (output_dtypes[i] != aliased_input.dtype()) {
+        std::ostringstream msg;
+        msg << "[metal_kernel] Output " << i
+            << " aliases an input with a different dtype." << std::endl;
+        throw std::invalid_argument(msg.str());
+      }
+      if (!aliased_input.flags().row_contiguous) {
+        std::ostringstream msg;
+        msg << "[metal_kernel] Output " << i
+            << " aliases a non-row-contiguous input; refusing to insert a "
+               "hidden copy for an in-place output."
+            << std::endl;
+        throw std::invalid_argument(msg.str());
+      }
     }
 
     auto s = to_stream(s_);
@@ -319,7 +369,8 @@ CustomKernelFunction metal_kernel(
             init_value,
             std::vector<ScalarArg>{},
             false,
-            0),
+            0,
+            output_to_input_aliases),
         std::move(inputs));
   };
 }
@@ -335,12 +386,38 @@ void CustomKernel::eval_gpu(
 
   std::vector<array> copies;
 
-  for (auto& out : outputs) {
-    if (init_value_) {
-      copies.emplace_back(init_value_.value(), out.dtype());
-      fill_gpu(copies.back(), out, s);
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    auto& out = outputs[i];
+    int alias =
+        output_to_input_aliases_.empty() ? -1 : output_to_input_aliases_[i];
+    if (alias >= 0) {
+      if (static_cast<size_t>(alias) >= inputs.size()) {
+        throw std::invalid_argument(
+            "[metal_kernel] Output alias points past the input list.");
+      }
+      const auto& input = inputs[static_cast<size_t>(alias)];
+      if (out.shape() != input.shape() || out.dtype() != input.dtype()) {
+        throw std::invalid_argument(
+            "[metal_kernel] Aliased outputs must exactly match input shape "
+            "and dtype.");
+      }
+      if (!input.flags().row_contiguous) {
+        throw std::invalid_argument(
+            "[metal_kernel] Refusing to alias output to a non-row-contiguous "
+            "input.");
+      }
+      out.copy_shared_buffer(input);
+      if (init_value_) {
+        copies.emplace_back(init_value_.value(), out.dtype());
+        fill_gpu(copies.back(), out, s);
+      }
     } else {
-      out.set_data(allocator::malloc(out.nbytes()));
+      if (init_value_) {
+        copies.emplace_back(init_value_.value(), out.dtype());
+        fill_gpu(copies.back(), out, s);
+      } else {
+        out.set_data(allocator::malloc(out.nbytes()));
+      }
     }
   }
 

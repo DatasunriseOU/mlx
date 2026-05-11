@@ -100,6 +100,7 @@ class MLX_API CommandEncoder {
   MTL::CommandBuffer* get_command_buffer() const {
     return buffer_.get();
   }
+  MTL::CommandBuffer* finish_encoding_and_get_command_buffer();
 
  private:
   MTL::ComputeCommandEncoder* get_command_encoder();
@@ -229,6 +230,7 @@ class MLX_API Device {
 
 MLX_API Device& device(mlx::core::Device);
 MLX_API CommandEncoder& get_command_encoder(Stream s);
+MLX_API void* current_command_buffer(Stream s);
 
 std::unordered_map<int, CommandEncoder>& get_command_encoders();
 NS::SharedPtr<NS::AutoreleasePool> new_scoped_memory_pool();

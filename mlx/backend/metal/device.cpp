@@ -454,6 +454,11 @@ void CommandEncoder::commit() {
   buffer_sizes_ = 0;
 }
 
+MTL::CommandBuffer* CommandEncoder::finish_encoding_and_get_command_buffer() {
+  end_encoding();
+  return get_command_buffer();
+}
+
 void CommandEncoder::synchronize() {
   auto pool = new_scoped_memory_pool();
   auto cb = NS::RetainPtr(get_command_buffer());
@@ -814,6 +819,11 @@ CommandEncoder& get_command_encoder(Stream s) {
         fmt::format("There is no Stream(gpu, {}) in current thread.", s.index));
   }
   return it->second;
+}
+
+void* current_command_buffer(Stream s) {
+  auto pool = new_scoped_memory_pool();
+  return get_command_encoder(s).finish_encoding_and_get_command_buffer();
 }
 
 std::unordered_map<int, CommandEncoder>& get_command_encoders() {

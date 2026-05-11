@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -17,17 +18,20 @@ namespace nb = nanobind;
 // mx::array.
 //
 // Supported device types:
-//   * kDLCPU (1)        : copies host bytes into a fresh mlx allocation.
+//   * kDLCPU (1)        : zero-copy; wraps the producer pointer when the
+//                         active allocator can expose it directly.
 //   * kDLMetal (8)      : zero-copy; wraps a foreign MTL::Buffer in shared
 //                         storage mode. Non-shared buffers are rejected.
 //
 // All other device types raise std::invalid_argument.
 //
-// kDLCPU input is copied into a fresh MLX allocation and the capsule deleter is
-// invoked before return. kDLMetal input is wrapped zero-copy, so the returned
-// mx::array keeps the capsule deleter alive until the array and any aliases are
-// destroyed. Rejected capsules are left unconsumed.
-mx::array dlpack_to_mlx(nb::object obj);
+// Accepted inputs are wrapped zero-copy, so the returned mx::array keeps the
+// capsule deleter alive until the array and any aliases are destroyed.
+// Rejected capsules are left unconsumed. Dtype conversion is rejected because it
+// would require a hidden copy/cast.
+mx::array dlpack_to_mlx(
+    nb::object obj,
+    std::optional<mx::Dtype> dtype = std::nullopt);
 
 mx::Dtype dlpack_to_mlx_dtype(const nb::dlpack::dtype& dt);
 mx::Shape validate_and_extract_shape(const nb::dlpack::dltensor& t);

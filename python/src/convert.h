@@ -67,7 +67,10 @@ mx::array nd_array_to_mlx(
     std::optional<nb::dlpack::dtype> nb_dtype = std::nullopt);
 
 nb::ndarray<nb::numpy> mlx_to_np_array(const mx::array& a);
-nb::ndarray<> mlx_to_dlpack(const mx::array& a);
+nb::object mlx_to_dlpack(
+    const mx::array& a,
+    int32_t requested_device_type = -1,
+    int32_t requested_device_id = 0);
 
 nb::object to_scalar(mx::array& a);
 

@@ -1,14 +1,22 @@
 // Copyright © 2024 Apple Inc.
 
 #include <limits>
+#include <memory>
 #include <sstream>
+#include <vector>
+
+#include <Python.h>
 
 #include <nanobind/stl/complex.h>
 
 #include "python/src/convert.h"
 #include "python/src/dlpack_consumer.h"
+#include "python/src/dlpack_format.h"
 #include "python/src/utils.h"
 
+#include "mlx/backend/metal/metal.h"
+#include "mlx/primitives.h"
+#include "mlx/transforms.h"
 #include "mlx/utils.h"
 
 enum PyScalarT {
@@ -17,6 +25,137 @@ enum PyScalarT {
   pyfloat = 2,
   pycomplex = 3,
 };
+
+namespace {
+
+struct DLPackExportOwner {
+  explicit DLPackExportOwner(mx::array array) : array(std::move(array)) {}
+
+  mx::array array;
+  std::vector<int64_t> shape;
+  std::vector<int64_t> strides;
+  dlpack_format::DLManagedTensor managed;
+};
+
+void dlpack_export_deleter(dlpack_format::DLManagedTensor* self) {
+  if (self == nullptr) {
+    return;
+  }
+  delete static_cast<DLPackExportOwner*>(self->manager_ctx);
+}
+
+void dlpack_capsule_destructor(PyObject* capsule) {
+  if (!PyCapsule_IsValid(capsule, "dltensor")) {
+    return;
+  }
+  auto* managed = static_cast<dlpack_format::DLManagedTensor*>(
+      PyCapsule_GetPointer(capsule, "dltensor"));
+  if (managed != nullptr && managed->deleter != nullptr) {
+    managed->deleter(managed);
+  }
+}
+
+nb::dlpack::dtype mlx_to_dlpack_dtype(mx::Dtype dtype) {
+  using Code = nb::dlpack::dtype_code;
+  switch (dtype.val()) {
+    case mx::Dtype::Val::bool_:
+      return {uint8_t(Code::Bool), 8, 1};
+    case mx::Dtype::Val::uint8:
+      return {uint8_t(Code::UInt), 8, 1};
+    case mx::Dtype::Val::uint16:
+      return {uint8_t(Code::UInt), 16, 1};
+    case mx::Dtype::Val::uint32:
+      return {uint8_t(Code::UInt), 32, 1};
+    case mx::Dtype::Val::uint64:
+      return {uint8_t(Code::UInt), 64, 1};
+    case mx::Dtype::Val::int8:
+      return {uint8_t(Code::Int), 8, 1};
+    case mx::Dtype::Val::int16:
+      return {uint8_t(Code::Int), 16, 1};
+    case mx::Dtype::Val::int32:
+      return {uint8_t(Code::Int), 32, 1};
+    case mx::Dtype::Val::int64:
+      return {uint8_t(Code::Int), 64, 1};
+    case mx::Dtype::Val::float16:
+      return {uint8_t(Code::Float), 16, 1};
+    case mx::Dtype::Val::bfloat16:
+      return {uint8_t(Code::Bfloat), 16, 1};
+    case mx::Dtype::Val::float32:
+      return {uint8_t(Code::Float), 32, 1};
+    case mx::Dtype::Val::float64:
+      return {uint8_t(Code::Float), 64, 1};
+    case mx::Dtype::Val::complex64:
+      return {uint8_t(Code::Complex), 64, 1};
+    default:
+      throw nb::type_error("type cannot be converted to DLPack.");
+  }
+}
+
+void prepare_dlpack_export(mx::array& a, int32_t device_type) {
+  if (device_type != dlpack_format::kDLMetal) {
+    a.eval();
+    return;
+  }
+  if (a.status() == mx::array::Status::unscheduled) {
+    if (a.has_primitive() && a.primitive().device() == mx::Device::gpu &&
+        !a.is_tracer()) {
+      mx::async_eval(a);
+    } else {
+      a.eval();
+    }
+  } else if (
+      a.status() == mx::array::Status::evaluated && a.event().valid() &&
+      a.event().stream().device != mx::Device::gpu) {
+    a.wait();
+  }
+}
+
+nb::object make_dlpack_capsule(mx::array a, int32_t device_type, int32_t device_id) {
+  {
+    nb::gil_scoped_release nogil;
+    prepare_dlpack_export(a, device_type);
+  }
+
+  auto owner = std::make_unique<DLPackExportOwner>(std::move(a));
+  owner->shape.reserve(owner->array.ndim());
+  for (auto dim : owner->array.shape()) {
+    owner->shape.push_back(static_cast<int64_t>(dim));
+  }
+  owner->strides.assign(owner->array.strides().begin(), owner->array.strides().end());
+
+  auto& tensor = owner->managed.dl_tensor;
+  if (device_type == dlpack_format::kDLMetal) {
+    tensor.data = owner->array.buffer().ptr();
+    tensor.byte_offset = static_cast<uint64_t>(owner->array.offset());
+  } else if (device_type == dlpack_format::kDLCPU) {
+    tensor.data = owner->array.data<void>();
+    tensor.byte_offset = 0;
+  } else {
+    std::ostringstream msg;
+    msg << "[array] cannot export mx.array as DLPack device_type "
+        << device_type << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  tensor.device = {device_type, device_id};
+  tensor.ndim = owner->array.ndim();
+  tensor.dtype = mlx_to_dlpack_dtype(owner->array.dtype());
+  tensor.shape = owner->shape.data();
+  tensor.strides = owner->strides.data();
+  owner->managed.manager_ctx = owner.get();
+  owner->managed.deleter = dlpack_export_deleter;
+
+  PyObject* capsule = PyCapsule_New(
+      static_cast<void*>(&owner->managed),
+      "dltensor",
+      dlpack_capsule_destructor);
+  if (capsule == nullptr) {
+    throw nb::python_error();
+  }
+  owner.release();
+  return nb::steal<nb::object>(capsule);
+}
+
+} // namespace
 
 int check_shape_dim(int64_t dim) {
   if (dim > std::numeric_limits<int>::max() ||
@@ -164,8 +303,22 @@ nb::ndarray<nb::numpy> mlx_to_np_array(const mx::array& a) {
   return mlx_to_nd_array<nb::numpy>(a);
 }
 
-nb::ndarray<> mlx_to_dlpack(const mx::array& a) {
-  return mlx_to_nd_array<>(a);
+nb::object mlx_to_dlpack(
+    const mx::array& a,
+    int32_t requested_device_type,
+    int32_t requested_device_id) {
+  int32_t device_type = requested_device_type;
+  if (device_type == -1) {
+    device_type =
+        mx::metal::is_available() ? dlpack_format::kDLMetal
+                                  : dlpack_format::kDLCPU;
+  }
+  if (device_type == dlpack_format::kDLMetal && !mx::metal::is_available()) {
+    throw std::invalid_argument(
+        "[array] cannot export a kDLMetal DLPack capsule without an "
+        "available Metal backend.");
+  }
+  return make_dlpack_capsule(a, device_type, requested_device_id);
 }
 
 nb::object to_scalar(mx::array& a) {
@@ -498,8 +651,31 @@ mx::array create_array(nb::object v, std::optional<mx::Dtype> t) {
   }
 
   const bool has_mlx_array = nb::hasattr(v, "__mlx_array__");
-  const bool is_dlpack =
-      PyCapsule_CheckExact(v.ptr()) || nb::hasattr(v, "__dlpack__");
+  const bool is_dlpack_capsule = PyCapsule_CheckExact(v.ptr());
+  const bool is_dlpack = is_dlpack_capsule || nb::hasattr(v, "__dlpack__");
+
+  if (is_dlpack_capsule) {
+    auto arr = dlpack_to_mlx(v, t);
+    if (!t.has_value() || t.value() == arr.dtype()) {
+      return arr;
+    }
+    throw std::invalid_argument(
+        "[array] DLPack dtype conversion would require a copy/cast. Export "
+        "or produce the tensor with the requested dtype before passing it to "
+        "mx.array.");
+  }
+
+  if (is_dlpack && !has_mlx_array && !nb::hasattr(v, "__array_interface__") &&
+      !nb::hasattr(v, "__array_struct__")) {
+    auto arr = dlpack_to_mlx(v, t);
+    if (!t.has_value() || t.value() == arr.dtype()) {
+      return arr;
+    }
+    throw std::invalid_argument(
+        "[array] DLPack dtype conversion would require a copy/cast. Export "
+        "or produce the tensor with the requested dtype before passing it to "
+        "mx.array.");
+  }
 
   if (!has_mlx_array && nb::ndarray_check(v)) {
     using ContigArray = nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu>;
@@ -518,8 +694,14 @@ mx::array create_array(nb::object v, std::optional<mx::Dtype> t) {
     auto arr = nb::cast<mx::array>(v.attr("__mlx_array__")());
     return mx::astype(arr, t.value_or(arr.dtype()));
   } else if (is_dlpack) {
-    auto arr = dlpack_to_mlx(v);
-    return mx::astype(arr, t.value_or(arr.dtype()));
+    auto arr = dlpack_to_mlx(v, t);
+    if (!t.has_value() || t.value() == arr.dtype()) {
+      return arr;
+    }
+    throw std::invalid_argument(
+        "[array] DLPack dtype conversion would require a copy/cast. Export "
+        "or produce the tensor with the requested dtype before passing it to "
+        "mx.array.");
   } else {
     auto arr = to_array_with_accessor(v);
     return mx::astype(arr, t.value_or(arr.dtype()));

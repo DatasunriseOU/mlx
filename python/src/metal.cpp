@@ -1,4 +1,5 @@
 // Copyright © 2023-2024 Apple Inc.
+#include <cstdint>
 #include <iostream>
 
 #include <nanobind/nanobind.h>
@@ -8,9 +9,11 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/metal.h"
 #include "mlx/device.h"
 #include "mlx/memory.h"
+#include "mlx/utils.h"
 #include "python/src/small_vector.h"
 
 namespace mx = mlx::core;
@@ -90,6 +93,25 @@ void init_metal(nb::module_& m) {
       &mx::metal::stop_capture,
       R"pbdoc(
       Stop a Metal capture.
+      )pbdoc");
+  metal.def(
+      "_current_command_buffer",
+      [](mx::StreamOrDevice s) {
+        auto stream = mx::to_stream(s);
+        if (stream.device != mx::Device::gpu) {
+          throw std::invalid_argument(
+              "[metal._current_command_buffer] Expected a GPU stream or device.");
+        }
+        return reinterpret_cast<uintptr_t>(
+            mx::metal::current_command_buffer(stream));
+      },
+      "stream"_a = std::monostate{},
+      R"pbdoc(
+      Return the current borrowed Metal command buffer pointer for interop.
+
+      This is an internal scheduling hook for zero-copy framework interop.
+      The pointer is owned and committed by MLX; consumers may encode work
+      into it but must not retain, release, or commit it.
       )pbdoc");
   metal.def("device_info", []() {
     DEPRECATE("mx.metal.device_info", "mx.device_info");

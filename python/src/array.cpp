@@ -496,7 +496,31 @@ void init_array(nb::module_& m) {
               new (&arr) mx::array(nd_array_to_mlx(nd, std::nullopt));
             }
           })
-      .def("__dlpack__", [](const mx::array& a) { return mlx_to_dlpack(a); })
+      .def(
+          "__dlpack__",
+          [](const mx::array& a,
+             nb::object /*stream*/,
+             nb::object /*max_version*/,
+             nb::object dl_device,
+             nb::object /*copy*/) {
+            int32_t device_type = -1;
+            int32_t device_id = 0;
+            if (!dl_device.is_none()) {
+              nb::tuple device = nb::cast<nb::tuple>(dl_device);
+              if (nb::len(device) != 2) {
+                throw std::invalid_argument(
+                    "__dlpack__ dl_device must be a (device_type, device_id) "
+                    "tuple.");
+              }
+              device_type = nb::cast<int32_t>(device[0]);
+              device_id = nb::cast<int32_t>(device[1]);
+            }
+            return mlx_to_dlpack(a, device_type, device_id);
+          },
+          "stream"_a = nb::none(),
+          "max_version"_a = nb::none(),
+          "dl_device"_a = nb::none(),
+          "copy"_a = nb::none())
       .def(
           "__dlpack_device__",
           [](const mx::array& a) {
@@ -504,8 +528,6 @@ void init_array(nb::module_& m) {
             // https://github.com/dmlc/dlpack/blob/5c210da409e7f1e51ddf445134a4376fdbd70d7d/include/dlpack/dlpack.h#L74
             if (mx::metal::is_available()) {
               return nb::make_tuple(8, 0);
-            } else if (mx::cu::is_available()) {
-              return nb::make_tuple(13, 0);
             } else {
               // CPU device
               return nb::make_tuple(1, 0);

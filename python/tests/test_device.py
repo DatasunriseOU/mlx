@@ -112,6 +112,18 @@ class TestStream(mlx_tests.MLXTestCase):
         b = mx.add(x, y, stream=s_cpu)
         self.assertEqual(a.item(), b.item())
 
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_current_metal_command_buffer(self):
+        ptr = mx.metal._current_command_buffer()
+        self.assertIsInstance(ptr, int)
+        self.assertNotEqual(ptr, 0)
+
+        stream = mx.default_stream(mx.gpu)
+        self.assertNotEqual(mx.metal._current_command_buffer(stream), 0)
+
+        with self.assertRaises(ValueError):
+            mx.metal._current_command_buffer(mx.cpu)
+
 
 class TestDeviceInfo(mlx_tests.MLXTestCase):
     def test_device_count(self):

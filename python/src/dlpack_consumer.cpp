@@ -2,7 +2,6 @@
 
 #include "python/src/dlpack_consumer.h"
 
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -184,35 +183,43 @@ void mark_capsule_consumed(PyObject* capsule, bool versioned) {
   }
 }
 
-mx::array build_cpu_array(nb::dlpack::dltensor& t, const mx::Shape& shape) {
+mx::array build_cpu_array(
+    nb::dlpack::dltensor& t,
+    const mx::Shape& shape,
+    std::optional<mx::Dtype> dtype,
+    std::shared_ptr<DLPackOwner> owner) {
   if (!is_row_contiguous(shape, t.strides)) {
     throw std::invalid_argument(
         "[array] non-row-contiguous DLPack strides are not supported "
         "for kDLCPU tensors yet.");
   }
-  if (t.byte_offset != 0) {
+  auto source_dtype = dlpack_to_mlx_dtype(t.dtype);
+  if (dtype.has_value() && dtype.value() != source_dtype) {
     throw std::invalid_argument(
-        "[array] kDLCPU capsule with non-zero byte_offset is not "
-        "supported yet.");
+        "[array] DLPack dtype conversion would require a copy/cast. Export "
+        "or produce the tensor with the requested dtype before passing it to "
+        "mx.array.");
   }
-  auto dtype = dlpack_to_mlx_dtype(t.dtype);
-  size_t nbytes = checked_num_bytes(shape, dtype);
+  size_t nbytes = checked_num_bytes(shape, source_dtype);
   if (nbytes > 0 && t.data == nullptr) {
     throw std::invalid_argument(
         "[array] kDLCPU capsule has null data pointer.");
   }
 
-  // Allocate a fresh mlx buffer and copy the producer's bytes in. This
-  // mirrors the semantics of nd_array_to_mlx_contiguous for the kDLCPU
-  // path. We use the (allocator::Buffer, Shape, Dtype, Deleter) overload to
-  // get an array whose status() == Status::available immediately.
-  auto buffer = mx::allocator::malloc(nbytes);
-  if (nbytes > 0) {
-    std::memcpy(static_cast<uint8_t*>(buffer.raw_ptr()), t.data, nbytes);
+  auto data = static_cast<void*>(
+      static_cast<uint8_t*>(t.data) + static_cast<size_t>(t.byte_offset));
+  auto buffer = mx::allocator::make_buffer(data, nbytes);
+  if (nbytes > 0 && buffer.ptr() == nullptr) {
+    throw std::invalid_argument(
+        "[array] kDLCPU DLPack tensor cannot be wrapped zero-copy by the "
+        "active MLX allocator. Refuse to create a hidden staging copy.");
   }
-  mx::array out(buffer, shape, dtype, mx::allocator::free);
+  mx::Deleter deleter = [owner](mx::allocator::Buffer buffer) mutable {
+    mx::allocator::release(buffer);
+    owner.reset();
+  };
 
-  return out;
+  return mx::array(buffer, shape, source_dtype, std::move(deleter));
 }
 
 } // namespace
@@ -233,7 +240,7 @@ void DLPackOwner::invoke() {
   active_ = false;
 }
 
-mx::array dlpack_to_mlx(nb::object obj) {
+mx::array dlpack_to_mlx(nb::object obj, std::optional<mx::Dtype> dtype) {
   // Accept either:
   //   * a PyCapsule (raw DLPack output),
   //   * an object that returns a PyCapsule from __dlpack__(),
@@ -269,10 +276,9 @@ mx::array dlpack_to_mlx(nb::object obj) {
   switch (t.device.device_type) {
     case dlpack_format::kDLCPU: {
       auto owner = std::make_shared<DLPackOwner>(p.versioned, p.managed);
-      auto out = build_cpu_array(t, shape);
+      auto out = build_cpu_array(t, shape, dtype, owner);
       mark_capsule_consumed(p.capsule, p.versioned);
       owner->activate();
-      owner->invoke();
       return out;
     }
     case dlpack_format::kDLMetal: {

@@ -23,6 +23,57 @@ except ImportError as exc:  # pragma: no cover - import error is environment spe
 
 
 class TestArrayDLPackBasic(unittest.TestCase):
+    @staticmethod
+    def _capsule_device(capsule):
+        class DLDevice(ctypes.Structure):
+            _fields_ = [
+                ("device_type", ctypes.c_int32),
+                ("device_id", ctypes.c_int32),
+            ]
+
+        class DLDataType(ctypes.Structure):
+            _fields_ = [
+                ("code", ctypes.c_uint8),
+                ("bits", ctypes.c_uint8),
+                ("lanes", ctypes.c_uint16),
+            ]
+
+        class DLTensor(ctypes.Structure):
+            _fields_ = [
+                ("data", ctypes.c_void_p),
+                ("device", DLDevice),
+                ("ndim", ctypes.c_int32),
+                ("dtype", DLDataType),
+                ("shape", ctypes.POINTER(ctypes.c_int64)),
+                ("strides", ctypes.POINTER(ctypes.c_int64)),
+                ("byte_offset", ctypes.c_uint64),
+            ]
+
+        class DLManagedTensor(ctypes.Structure):
+            _fields_ = [
+                ("dl_tensor", DLTensor),
+                ("manager_ctx", ctypes.c_void_p),
+                ("deleter", ctypes.c_void_p),
+            ]
+
+        get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+        get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        get_pointer.restype = ctypes.c_void_p
+        ptr = get_pointer(capsule, b"dltensor")
+        tensor = ctypes.cast(ptr, ctypes.POINTER(DLManagedTensor)).contents
+        device = tensor.dl_tensor.device
+        return device.device_type, device.device_id
+
+    def test_mx_array_dlpack_device_matches_capsule(self):
+        x = mx.arange(8, dtype=mx.float32)
+        capsule = x.__dlpack__()
+        self.assertEqual(self._capsule_device(capsule), x.__dlpack_device__())
+
+    def test_mx_array_dlpack_explicit_cpu_device(self):
+        x = mx.arange(8, dtype=mx.float32)
+        capsule = x.__dlpack__(dl_device=(1, 0))
+        self.assertEqual(self._capsule_device(capsule), (1, 0))
+
     def test_mx_array_accepts_dlpack_capsule(self):
         # Pass a raw PyCapsule rather than the producer object.
         arr_np = np.arange(8, dtype=np.int32).reshape(2, 4)
@@ -64,11 +115,37 @@ class TestArrayDLPackBasic(unittest.TestCase):
         y = mx.array(DLPackProducer(x))
         self.assertTrue(mx.array_equal(x, y).item())
 
-    def test_mx_array_dlpack_dtype_override(self):
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_mx_array_exports_lazy_metal_array(self):
+        x = mx.arange(20, dtype=mx.float32).reshape(4, 5)
+        y = x + 1
+        z = mx.array(y.__dlpack__())
+        self.assertTrue(mx.array_equal(y, z).item())
+
+    def test_mx_array_dlpack_export_inside_custom_vjp_transform(self):
+        @mx.custom_function
+        def roundtrip_double(x):
+            y = x * 2
+            return mx.array(y.__dlpack__())
+
+        @roundtrip_double.vjp
+        def roundtrip_double_vjp(primals, cotangent, _outputs):
+            return cotangent * 2
+
+        def loss(x):
+            return mx.sum(roundtrip_double(x))
+
+        x = mx.arange(8, dtype=mx.float32)
+        value, grad = mx.value_and_grad(loss)(x)
+        mx.eval(value, grad)
+
+        self.assertEqual(value.item(), 56.0)
+        self.assertTrue(mx.array_equal(grad, mx.ones_like(x) * 2).item())
+
+    def test_mx_array_dlpack_dtype_override_rejected(self):
         arr_np = np.arange(6, dtype=np.int32).reshape(2, 3)
-        arr_mx = mx.array(arr_np.__dlpack__(), dtype=mx.float32)
-        self.assertEqual(arr_mx.dtype, mx.float32)
-        self.assertTrue(np.array_equal(np.asarray(arr_mx), arr_np.astype(np.float32)))
+        with self.assertRaises(Exception):
+            mx.array(arr_np.__dlpack__(), dtype=mx.float32)
 
     def test_mx_array_prefers_mlx_array_protocol_over_dlpack(self):
         class BothProtocols:
@@ -106,9 +183,7 @@ class TestArrayDLPackBasic(unittest.TestCase):
                 else:
                     arr[0, 0] = 1
                 converted = mx.array(arr.__dlpack__())
-                # `mx.array` applies the same dtype defaults to DLPack inputs
-                # as it does to NumPy inputs, e.g. float64 defaults to float32.
-                self.assertEqual(converted.dtype, mx.array(arr).dtype)
+                self.assertEqual(converted.dtype, mx_dtype)
                 self.assertEqual(tuple(converted.shape), (2, 3))
 
 

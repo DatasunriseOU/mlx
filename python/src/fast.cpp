@@ -304,7 +304,8 @@ void init_fast(nb::module_& parent_module) {
          const std::string& source,
          const std::string& header,
          bool ensure_row_contiguous,
-         bool atomic_outputs) {
+         bool atomic_outputs,
+         const std::vector<int>& output_to_input_aliases) {
         auto kernel = mx::fast::metal_kernel(
             name,
             input_names,
@@ -312,7 +313,8 @@ void init_fast(nb::module_& parent_module) {
             source,
             header,
             ensure_row_contiguous,
-            atomic_outputs);
+            atomic_outputs,
+            output_to_input_aliases);
         return nb::cpp_function(
             PyCustomKernelFunction(std::move(kernel), "[metal_kernel]"),
             nb::kw_only(),
@@ -356,6 +358,7 @@ void init_fast(nb::module_& parent_module) {
       "header"_a = "",
       "ensure_row_contiguous"_a = true,
       "atomic_outputs"_a = false,
+      "output_to_input_aliases"_a = std::vector<int>{},
       R"pbdoc(
       A jit-compiled custom Metal kernel defined from a source string.
 
@@ -376,6 +379,11 @@ void init_fast(nb::module_& parent_module) {
            before the kernel runs. Default: ``True``.
         atomic_outputs (bool): Whether to use atomic outputs in the function signature
            e.g. ``device atomic<float>``. Default: ``False``.
+        output_to_input_aliases (List[int]): Optional per-output input indices.
+           A non-negative entry makes the corresponding output write into the
+           existing input buffer instead of allocating a new output buffer. The
+           aliased input must have the exact output shape, dtype, and be row
+           contiguous. Use ``-1`` for outputs that should be allocated normally.
 
       Returns:
         Callable ``metal_kernel``.

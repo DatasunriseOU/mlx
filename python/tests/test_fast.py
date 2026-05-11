@@ -1011,6 +1011,34 @@ class TestFast(mlx_tests.MLXTestCase):
         out = call_kernel(a, source)
         self.assertTrue(mx.array_equal(out, mx.ones_like(out)))
 
+    @unittest.skipIf(not mx.metal.is_available(), "Metal is not available")
+    def test_custom_kernel_output_aliases_input(self):
+        source = """
+            uint elem = thread_position_in_grid.x;
+            out[elem] = inp[elem] + 1.0f;
+        """
+        a = mx.zeros(shape=(8,), dtype=mx.float32)
+        kernel = mx.fast.metal_kernel(
+            name="alias_input",
+            input_names=["inp"],
+            output_names=["out"],
+            source=source,
+            output_to_input_aliases=[0],
+        )
+        out = kernel(
+            inputs=[a],
+            grid=(a.size, 1, 1),
+            threadgroup=(a.size, 1, 1),
+            output_shapes=[a.shape],
+            output_dtypes=[a.dtype],
+            stream=mx.gpu,
+        )[0]
+        mx.eval(out)
+
+        expected = mx.ones_like(a)
+        self.assertTrue(mx.array_equal(out, expected))
+        self.assertTrue(mx.array_equal(a, expected))
+
 
 if __name__ == "__main__":
     mlx_tests.MLXTestRunner()

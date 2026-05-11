@@ -2026,17 +2026,27 @@ class TestArray(mlx_tests.MLXTestCase):
         self.assertEqual(z.item(), 3)
 
     def test_dlpack(self):
+        class CPUDLPackView:
+            def __init__(self, array):
+                self.array = array
+
+            def __dlpack__(self):
+                return self.array.__dlpack__(dl_device=(1, 0))
+
+            def __dlpack_device__(self):
+                return (1, 0)
+
         x = mx.array(1, dtype=mx.int32)
-        y = np.from_dlpack(x)
+        y = np.from_dlpack(CPUDLPackView(x))
         self.assertTrue(mx.array_equal(y, x))
 
         x = mx.array([[1.0, 2.0], [3.0, 4.0]])
-        y = np.from_dlpack(x)
+        y = np.from_dlpack(CPUDLPackView(x))
         self.assertTrue(mx.array_equal(y, x))
 
         x = mx.arange(16).reshape(4, 4)
         x = x[::2, ::2]
-        y = np.from_dlpack(x)
+        y = np.from_dlpack(CPUDLPackView(x))
         self.assertTrue(mx.array_equal(y, x))
 
     def test_getitem_with_list(self):

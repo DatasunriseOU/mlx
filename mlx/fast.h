@@ -75,7 +75,8 @@ MLX_API CustomKernelFunction metal_kernel(
     const std::string& source,
     const std::string& header = "",
     bool ensure_row_contiguous = true,
-    bool atomic_outputs = false);
+    bool atomic_outputs = false,
+    const std::vector<int>& output_to_input_aliases = {});
 
 MLX_API CustomKernelFunction cuda_kernel(
     const std::string& name,
