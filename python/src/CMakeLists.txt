@@ -88,12 +88,41 @@ set_target_properties(
 
 target_link_libraries(core PRIVATE mlx)
 
+if(TARGET nanobind-static-abi3)
+  set(_MLX_PYTHON_BRIDGE_NANOBIND_TARGET nanobind-static-abi3)
+else()
+  set(_MLX_PYTHON_BRIDGE_NANOBIND_TARGET nanobind-static)
+endif()
+
+add_library(mlx_python_bridge SHARED ${CMAKE_CURRENT_SOURCE_DIR}/array_wrapper.cpp)
+nanobind_compile_options(mlx_python_bridge)
+nanobind_link_options(mlx_python_bridge)
+target_compile_definitions(mlx_python_bridge PRIVATE NB_DOMAIN=mlx)
+target_link_libraries(mlx_python_bridge PRIVATE mlx ${_MLX_PYTHON_BRIDGE_NANOBIND_TARGET})
+target_include_directories(mlx_python_bridge PRIVATE ${PROJECT_SOURCE_DIR})
+set_target_properties(
+  mlx_python_bridge
+  PROPERTIES OUTPUT_NAME mlx_python_bridge
+             LIBRARY_OUTPUT_DIRECTORY ${MLX_PYTHON_BINDINGS_OUTPUT_DIRECTORY}/lib
+             LIBRARY_OUTPUT_DIRECTORY_RELEASE ${MLX_PYTHON_BINDINGS_OUTPUT_DIRECTORY}/lib
+             LIBRARY_OUTPUT_DIRECTORY_DEBUG ${MLX_PYTHON_BINDINGS_OUTPUT_DIRECTORY}/lib
+             LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO ${MLX_PYTHON_BINDINGS_OUTPUT_DIRECTORY}/lib
+             LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL ${MLX_PYTHON_BINDINGS_OUTPUT_DIRECTORY}/lib)
+
 if(BUILD_SHARED_LIBS)
   if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     set_target_properties(core PROPERTIES INSTALL_RPATH "@loader_path/lib")
+    set_target_properties(mlx_python_bridge PROPERTIES INSTALL_RPATH "@loader_path")
   else()
     set_target_properties(core PROPERTIES INSTALL_RPATH "\$ORIGIN/lib")
+    set_target_properties(mlx_python_bridge PROPERTIES INSTALL_RPATH "\$ORIGIN")
   endif()
   # Do not add build dir to rpath.
   set_target_properties(core PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
+  set_target_properties(mlx_python_bridge PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
 endif()
+
+install(
+  TARGETS mlx_python_bridge
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
