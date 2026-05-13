@@ -354,11 +354,13 @@ if(MLX_BUILD_PYTHON_BINDINGS)
     Python 3.10
     COMPONENTS Interpreter Development.Module
     REQUIRED)
+  # Pinned to XXXXRT666/nanobind#metal-dlpack-cast (wjakob/nanobind PR #1338),
+  # required by ml-explore/mlx PR #3531 for Metal DLPack ndarray imports +
+  # byte_offset support. Drop GIT_SHALLOW because a SHA pin needs full history.
   FetchContent_Declare(
     nanobind
-    GIT_REPOSITORY https://github.com/wjakob/nanobind.git
-    GIT_TAG v2.12.0
-    GIT_SHALLOW TRUE
+    GIT_REPOSITORY https://github.com/XXXXRT666/nanobind.git
+    GIT_TAG 33f52e635db5e6229060481d16a167230a1a474b
     EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(nanobind)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/python/src)
