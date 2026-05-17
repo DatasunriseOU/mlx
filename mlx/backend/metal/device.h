@@ -56,6 +56,19 @@ class MLX_API CommandEncoder {
   void dispatch_threads(MTL::Size grid_dims, MTL::Size group_dims);
   void maybeInsertBarrier();
 
+  // Borrow the active compute encoder for framework interop that needs to
+  // encode into MLX's current command buffer. The caller must not end it.
+  MTL::ComputeCommandEncoder* raw_command_encoder() {
+    return get_command_encoder();
+  }
+
+  // Preserve MLX dependency and commit accounting for an externally encoded
+  // dispatch on raw_command_encoder().
+  void prepare_external_dispatch() {
+    maybeInsertBarrier();
+    buffer_ops_++;
+  }
+
   void set_compute_pipeline_state(MTL::ComputePipelineState* kernel) {
     get_command_encoder()->setComputePipelineState(kernel);
   }
