@@ -74,6 +74,9 @@ MLX_API array host_accessible_array(array a);
 /** Print the exception and then abort. */
 MLX_API void abort_with_exception(const std::exception& error);
 
+/** Return whether current thread is the first one that called this function. */
+bool is_main_thread();
+
 /** Holds information about floating-point types. */
 struct MLX_API finfo {
   explicit finfo(Dtype dtype);
