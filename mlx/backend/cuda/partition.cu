@@ -207,6 +207,16 @@ void gpu_partition_small(
                           out_nc_strides_param,
                           nc_dim);
                     });
+                  } else {
+                    // gpu_partition_small_fits() is expected to gate every
+                    // caller so this branch is unreachable. Guard against a
+                    // silent no-launch (which would leave `out` uninitialized)
+                    // if the fits-check key size and the radix key size used
+                    // here ever disagree for some dtype.
+                    throw std::runtime_error(
+                        "[partition] radix_select_small shared-memory request "
+                        "exceeds budget; gpu_partition_small_fits() should have "
+                        "prevented this dispatch.");
                   }
                 });
           });
