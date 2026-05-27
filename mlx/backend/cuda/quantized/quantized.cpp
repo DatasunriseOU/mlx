@@ -18,11 +18,16 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& encoder = cu::get_command_encoder(s);
 
   array x = ensure_row_contiguous(inputs[0], encoder, s);
-  const array& w = inputs[1];
-  const array& scales = inputs[2];
+  // The qmm/qmv kernels require the weight, scales and biases to be
+  // row-contiguous in their last two dims (see supports_* in qmm.cu). Callers
+  // may hand us non-contiguous quantized buffers (e.g. sliced/prepared FP8
+  // KV-cache tensors); make them contiguous so we route to a real kernel
+  // instead of throwing "No implementation for problem shape".
+  array w = ensure_row_contiguous(inputs[1], encoder, s);
+  array scales = ensure_row_contiguous(inputs[2], encoder, s);
   std::optional<array> biases;
   if (inputs.size() > 3) {
-    biases = inputs[3];
+    biases = ensure_row_contiguous(inputs[3], encoder, s);
   }
 
   auto supports = [&](auto&& f) {
