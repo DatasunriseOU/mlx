@@ -21,14 +21,14 @@
     "VERSION_SKEW",
     "UNVERIFIABLE"
   ],
-  "generated_at": "2026-05-31T20:43:49Z",
-  "manifest_version": 2,
+  "generated_at": "2026-05-31T21:01:21Z",
+  "manifest_version": 3,
   "repo": "/Volumes/external/sources/mlx",
   "schema": "gkb.source_capability_manifest/v1",
   "sources": {
     "bd": {
       "capability": null,
-      "detected_at": "2026-05-31T20:43:49Z",
+      "detected_at": "2026-05-31T21:01:21Z",
       "evidence": {
         "command": "ls .beads/*.jsonl",
         "observation": "no .beads/*.jsonl — no bd tier"
@@ -65,6 +65,7 @@
           "metal": 41,
           "py": 130
         },
+        "missing_analyzers": [],
         "missing_configured_roots": [],
         "native_provenance": {
           "clang_langs_present": [
@@ -79,11 +80,11 @@
         },
         "parsable": false,
         "parse_status": {
-          "c": "native:libclang",
-          "cpp": "native:libclang",
-          "cuda": "native:libclang",
-          "metal": "native:libclang(as-c++)",
-          "py": "native:stdlib-ast(provenance)"
+          "c": "native:libclang (available)",
+          "cpp": "native:libclang (available)",
+          "cuda": "native:libclang (available)",
+          "metal": "native:libclang(as-c++) (available)",
+          "py": "native:stdlib-ast (available)"
         },
         "primary_lang": "c",
         "roots": [
@@ -97,7 +98,7 @@
           "py"
         ]
       },
-      "detected_at": "2026-05-31T20:43:49Z",
+      "detected_at": "2026-05-31T21:01:21Z",
       "evidence": {
         "command": "scan ['.'] (repo root (no src/ — full scan)) by extension",
         "observation": "langs[c:482 cpp:376 cuda:135 py:130 metal:41] all=1164 primary=c parsable(axiom)=False native_provenance=libclang (wired=none; provenance=['c', 'cpp', 'cuda', 'metal', 'py']; degraded=none)"
@@ -119,7 +120,7 @@
           "**/*.md"
         ]
       },
-      "detected_at": "2026-05-31T20:43:49Z",
+      "detected_at": "2026-05-31T21:01:21Z",
       "evidence": {
         "command": "corpus globs ['docs/**/*.md', '*.md', '**/*.md'] | wc -l",
         "observation": "11 files (docs=1 root=4 planning=0 other=6)"
@@ -128,21 +129,21 @@
     },
     "git": {
       "capability": {
-        "depth": 256,
-        "head_sha": "fe202d1def68975858e7b37210bec913f1cad449",
+        "depth": 257,
+        "head_sha": "055c88d0142da36ecebc7c186cc5e5da226b377c",
         "provenance": "shallow",
         "shallow": true
       },
-      "detected_at": "2026-05-31T20:43:49Z",
+      "detected_at": "2026-05-31T21:01:21Z",
       "evidence": {
         "command": "git rev-parse --is-inside-work-tree; git rev-list --count HEAD",
-        "observation": "true; 256 (head fe202d1def68)"
+        "observation": "true; 257 (head 055c88d0142d)"
       },
       "present": true
     },
     "live_api": {
       "capability": null,
-      "detected_at": "2026-05-31T20:43:49Z",
+      "detected_at": "2026-05-31T21:01:21Z",
       "evidence": {
         "command": "curl /api/health; scan code for served-API",
         "observation": "no base_url configured in gkb config nor playwright; no served-API defined in code; tier dropped"
