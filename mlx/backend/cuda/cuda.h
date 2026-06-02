@@ -55,4 +55,24 @@ MLX_API allocator::Buffer import_external_buffer(void* ptr, size_t nbytes);
  * CUDA allocation. */
 MLX_API void free_external_buffer(allocator::Buffer buffer);
 
+/* Copy `nbytes` from a FOREIGN CUDA device pointer (e.g. a DLPack kDLCUDA /
+ * kDLCUDAManaged capsule produced by torch / tvm-ffi) into a FRESH MLX-managed
+ * allocation and return it.
+ *
+ * Unlike import_external_buffer (which wraps the foreign pointer and therefore
+ * forces an mx::array deleter to keep the foreign owner alive), this performs a
+ * single on-device cudaMemcpy(cudaMemcpyDefault) into a real allocator::malloc()
+ * buffer. The returned Buffer is owned by MLX and is freed through the normal
+ * allocator::free() path — NO foreign pointer and NO Python/DLPack owner ever
+ * enters MLX's graph or scheduler. This is the deadlock-free import primitive:
+ * the foreign capsule/torch tensor is only READ during the copy (on the calling
+ * thread) and may be released immediately afterwards on that same thread, so its
+ * (GIL-needing) deleter never runs on MLX's scheduler thread.
+ *
+ * The copy is synchronous on the current stream/thread; on return the data is
+ * fully resident in the MLX buffer. */
+MLX_API allocator::Buffer copy_external_to_mlx_buffer(
+    const void* src,
+    size_t nbytes);
+
 } // namespace mlx::core::cu

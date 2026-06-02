@@ -27,6 +27,12 @@ allocator::Buffer import_external_buffer(void*, size_t) {
 
 void free_external_buffer(allocator::Buffer) {}
 
+allocator::Buffer copy_external_to_mlx_buffer(const void*, size_t) {
+  throw std::runtime_error(
+      "[copy_external_to_mlx_buffer] No CUDA back-end: cannot import a CUDA "
+      "DLPack buffer.");
+}
+
 } // namespace cu
 
 namespace fast {

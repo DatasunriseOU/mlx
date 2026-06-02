@@ -490,39 +490,41 @@ mx::array cuda_dlpack_to_mlx_contiguous(
         "CUDA DLPack byte offset is not aligned to dtype size.");
   }
 
-  // Wrap the foreign CUDA device pointer in an MLX Buffer WITHOUT ownership.
-  // cu::import_external_buffer heap-allocates a CudaBuffer{ptr, nbytes, -1}
-  // wrapper so MLX reads the foreign pointer back correctly (the raw pointer
-  // cannot be handed to the Buffer ctor directly — MLX's CUDA Buffer wraps a
-  // CudaBuffer struct, not the data pointer). nbytes covers the full DLPack
-  // allocation including any byte_offset so the offset slice below stays in
-  // bounds.
-  auto nbytes = byte_offset + owner->nbytes();
-  auto buffer = mx::cu::import_external_buffer(owner->data_handle(), nbytes);
+  // DEADLOCK-FREE IMPORT (root cause + fix):
+  // The previous implementation wrapped the foreign CUDA pointer in an mx::array
+  // whose deleter CAPTURED the nanobind `owner` (the source torch tensor /
+  // DLPack capsule). That deleter decrefs a Python object, which needs the GIL.
+  // When MLX's SCHEDULER THREAD later destroyed that array's Data (e.g. during a
+  // subsequent mx.synchronize, which the main thread calls while holding the
+  // GIL), the scheduler blocked forever waiting for the GIL -> DEADLOCK on the
+  // SECOND consecutive CUDA import (and every iteration of a training loop). A
+  // gil_scoped_release around this function's own eval did NOT help because the
+  // deadlock is at the LATER user-called mx.synchronize, not here.
+  //
+  // The robust fix is to never let the foreign buffer (or any owner-capturing
+  // deleter) enter MLX's graph: copy the foreign device bytes into a FRESH
+  // MLX-managed buffer with a single on-device cudaMemcpy on THIS (calling)
+  // thread, then build the mx::array from that MLX-owned buffer with the DEFAULT
+  // allocator::free deleter. The foreign `owner` is only read during the copy
+  // and is released here on the calling thread (it holds the GIL, so the decref
+  // is safe) — nothing foreign ever reaches the scheduler.
+  const auto* base = static_cast<const std::byte*>(owner->data_handle());
+  const void* src = base + byte_offset;
+  auto nbytes = owner->nbytes();
 
-  // The deleter releases BOTH the foreign owner (DLPack capsule / torch tensor,
-  // captured in `owner`) AND the MLX wrapper struct. It must NOT route through
-  // allocator::free (which would recycle the foreign pointer into MLX's pool).
-  auto out = mx::array(
-      buffer,
-      shape,
-      type,
-      [owner](mx::allocator::Buffer b) { mx::cu::free_external_buffer(b); });
+  auto mlx_buffer = mx::cu::copy_external_to_mlx_buffer(src, nbytes);
 
-  auto offset = static_cast<int64_t>(byte_offset / itemsize);
-  if (offset != 0) {
-    auto flags = out.flags();
-    out.copy_shared_buffer(out, out.strides(), flags, out.data_size(), offset);
+  // MLX-owned buffer, DEFAULT allocator::free deleter (no `owner` captured).
+  auto out = mx::array(mlx_buffer, shape, type);
+
+  if (!dtype || *dtype == out.dtype()) {
+    // `out` already owns an evaluated, MLX-managed buffer; nothing to schedule.
+    return out;
   }
 
-  // Materialize into an MLX-owned GPU allocation with a single device-side copy
-  // (no host roundtrip). This is what recovers the kernel latency vs the prior
-  // .cpu().numpy() bounce, while leaving MLX in full control of the result's
-  // lifetime (the foreign torch buffer is only read during this copy, then the
-  // capsule owner is released). astype handles a requested dtype change.
-  auto result = (!dtype || *dtype == out.dtype())
-      ? mx::copy_to_new_buffer(out, mx::Device::gpu)
-      : mx::astype(out, *dtype, mx::Device::gpu);
+  // A dtype change is a normal MLX op over an MLX-owned input; evaluate it on
+  // the calling thread and detach so the result carries no live graph.
+  auto result = mx::astype(out, *dtype, mx::Device::gpu);
   result.eval();
   result.wait();
   result.detach();

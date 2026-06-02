@@ -417,6 +417,38 @@ void free_external_buffer(Buffer buffer) {
   delete buf;
 }
 
+Buffer copy_external_to_mlx_buffer(const void* src, size_t nbytes) {
+  // Allocate a REAL MLX-managed buffer (a CudaBuffer registered with the
+  // allocator and freed via the normal allocator::free path). On GB10/managed
+  // builds malloc() yields cudaMallocManaged unified memory; otherwise a pooled
+  // device allocation.
+  Buffer dst = allocator().malloc(nbytes);
+  if (nbytes == 0) {
+    return dst;
+  }
+  void* dst_ptr = dst.raw_ptr();
+  if (dst_ptr == nullptr) {
+    allocator().free(dst);
+    throw std::runtime_error(
+        "[copy_external_to_mlx_buffer] MLX allocation returned a null pointer.");
+  }
+  // Synchronous device-side copy on the CALLING thread. cudaMemcpyDefault
+  // resolves DtoD / managed transfers via unified addressing. Once this returns
+  // the data is fully resident in the MLX buffer and the foreign source may be
+  // released immediately — nothing foreign (and no Python/DLPack owner) ever
+  // enters MLX's graph or scheduler, so no GIL-needing deleter can run on the
+  // scheduler thread. This is what makes repeated CUDA DLPack imports
+  // deadlock-free.
+  cudaError_t err = cudaMemcpy(dst_ptr, src, nbytes, cudaMemcpyDefault);
+  if (err != cudaSuccess) {
+    allocator().free(dst);
+    throw std::runtime_error(
+        std::string("[copy_external_to_mlx_buffer] cudaMemcpy failed: ") +
+        cudaGetErrorString(err));
+  }
+  return dst;
+}
+
 } // namespace cu
 
 namespace allocator {
