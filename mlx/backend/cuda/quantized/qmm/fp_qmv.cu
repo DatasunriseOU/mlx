@@ -7,6 +7,8 @@
 #include "mlx/backend/cuda/quantized/quantized_utils.h"
 #include "mlx/dtype_utils.h"
 
+#include <algorithm>
+
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <cutlass/float8.h>
@@ -65,7 +67,8 @@ __device__ void fp_qmv_impl(
     const T* vec,
     T* out,
     int rows,
-    int cols) {
+    int cols,
+    int row_block) {
   auto block = cg::this_thread_block();
   auto warp = cg::tiled_partition<WARP_SIZE>(block);
 
@@ -73,7 +76,7 @@ __device__ void fp_qmv_impl(
   constexpr int nv_per_thread = vals_per_item * n_per_thread;
   auto g_idx = block.group_index();
   auto t_idx = block.thread_index();
-  int row = g_idx.y * rows_per_block + t_idx.y;
+  int row = row_block * rows_per_block + t_idx.y;
 
   vec += g_idx.x * cols;
   out += g_idx.x * rows;
@@ -169,8 +172,14 @@ __global__ void fp_qmv_single(
     T* out,
     int rows,
     int cols) {
+  // The N (output rows) dimension is tiled across gridDim.y. When the number of
+  // row-blocks exceeds the CUDA gridDim.y limit (65535), the launch folds the
+  // overflow into gridDim.z; reconstruct the global row-block index. When the
+  // grid fits in gridDim.y (gridDim.z == 1) this reduces to blockIdx.y, keeping
+  // the original mapping. gridDim.z is otherwise unused in the single path.
+  int row_block = blockIdx.y + blockIdx.z * gridDim.y;
   fp_qmv_impl<T, rows_per_block, n_per_thread, bits, group_size, use_mx_scale>(
-      mat, scales, vec, out, rows, cols);
+      mat, scales, vec, out, rows, cols, row_block);
 }
 
 template <
@@ -207,8 +216,10 @@ __global__ void fp_qmv_batched(
       mat_shape,
       mat_strides,
       scales_strides);
+  // In the batched path gridDim.z indexes the batch (consumed by
+  // adjust_matrix_offsets), so the row-block is simply blockIdx.y.
   fp_qmv_impl<T, rows_per_block, n_per_thread, bits, group_size, use_mx_scale>(
-      mat, scales, vec, out, rows, cols);
+      mat, scales, vec, out, rows, cols, int(blockIdx.y));
 }
 
 } // namespace cu
@@ -257,6 +268,14 @@ void fp_qmv(
     if constexpr (!std::is_same_v<T, double>) {
       dim3 block_dims{WARP_SIZE, rows_per_block};
       uint32_t blocks_y = (N + rows_per_block - 1) / rows_per_block;
+      // CUDA limits gridDim.y/z to 65535. For very large N (e.g. flattened MoE
+      // experts) blocks_y can exceed that, so split the row-block count across
+      // gridDim.y and gridDim.z; the single kernel reconstructs the global
+      // row-block as blockIdx.y + blockIdx.z * gridDim.y. (gridDim.z is free in
+      // the single path.)
+      constexpr uint32_t kMaxGridYZ = 65535;
+      uint32_t blocks_y_lo = std::min(blocks_y, kMaxGridYZ);
+      uint32_t blocks_z = (blocks_y + kMaxGridYZ - 1) / kMaxGridYZ;
       const uint32_t* mat_ptr = gpu_ptr<uint32_t>(mat);
       const T* vec_ptr = gpu_ptr<T>(vec);
       int n = 1;
@@ -282,7 +301,7 @@ void fp_qmv(
           }
           encoder.add_kernel_node(
               kernel,
-              {uint32_t(x.size() / K), blocks_y},
+              {uint32_t(x.size() / K), blocks_y_lo, blocks_z},
               block_dims,
               mat_ptr,
               gpu_ptr<uint8_t>(scales),
@@ -291,6 +310,18 @@ void fp_qmv(
               N,
               K);
         } else {
+          // The batched path uses gridDim.z for the batch dimension, so the
+          // row-block count must fit within the gridDim.y limit. Fail loud if
+          // it does not, rather than silently launching an invalid grid.
+          if (blocks_y > kMaxGridYZ) {
+            throw std::runtime_error(fmt::format(
+                "[quantized_matmul] fp_qmv batched grid.y={} exceeds the CUDA "
+                "limit of {} (N={}). This batched-large-N case is not yet "
+                "supported.",
+                blocks_y,
+                kMaxGridYZ,
+                N));
+          }
           auto kernel =
               cu::fp_qmv_batched<T, rows_per_block, n.value, 4, 32, true>;
           if (bits == 8) {

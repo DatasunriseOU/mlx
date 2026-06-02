@@ -133,7 +133,19 @@ void qmm_sm80(
       decltype(S_layout),
       decltype(dC),
       decltype(mma)>;
-  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+  // Opt in for >48 KB dynamic shared memory. Required on sm_121 (GB10) and
+  // others, where launching without this attribute is rejected with "invalid
+  // argument". Fail loud if the attribute cannot be set. This code lives in
+  // namespace cutlass_gemm, so qualify the error checker (which is in
+  // mlx::core) explicitly.
+  if (smem_bytes > 48 * 1024) {
+    mlx::core::check_cuda_error(
+        "cudaFuncSetAttribute(MaxDynamicSharedMemorySize)",
+        cudaFuncSetAttribute(
+            kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(smem_bytes)));
+  }
 
   dim3 num_blocks{uint32_t(ceil_div(m, size<0>(cta_tiler))),
                   uint32_t(ceil_div(n, size<1>(cta_tiler))),

@@ -134,8 +134,14 @@ __global__ void binary_g_nd(
     const __grid_constant__ cuda::std::array<int64_t, NDIM> b_strides) {
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
-  IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+  // The "rest" dimension is tiled across gridDim.y. When it is large enough that
+  // the number of blocks exceeds the CUDA gridDim.y limit (65535), the launch
+  // folds the overflow into gridDim.z; reconstruct the global block-row here.
+  // When the grid fits in gridDim.y (gridDim.z == 1) this reduces to the
+  // original blockIdx.y mapping.
+  IdxT block_row =
+      grid.block_index().y + grid.block_index().z * grid.dim_blocks().y;
+  IdxT index_rest = block_row * block.dim_threads().y + block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -172,8 +178,11 @@ __global__ void binary_g(
     int ndim) {
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
-  IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+  // See binary_g_nd: fold the gridDim.y overflow into gridDim.z for large
+  // "rest" dimensions. Reduces to blockIdx.y when gridDim.z == 1.
+  IdxT block_row =
+      grid.block_index().y + grid.block_index().z * grid.dim_blocks().y;
+  IdxT index_rest = block_row * block.dim_threads().y + block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -287,6 +296,14 @@ void binary_op_gpu_inplace(
                 auto block_dims = get_block_dims(dim0, rest, 1);
                 uint32_t num_blocks_x = cuda::ceil_div(dim0, block_dims.x);
                 uint32_t num_blocks_y = cuda::ceil_div(rest, block_dims.y);
+                // CUDA limits gridDim.y to 65535; split the row-block count
+                // across gridDim.y and gridDim.z for large tensors. The kernels
+                // reconstruct the row as blockIdx.y + blockIdx.z * gridDim.y.
+                constexpr uint32_t kMaxGridYZ = 65535;
+                uint32_t num_blocks_z = cuda::ceil_div(num_blocks_y, kMaxGridYZ);
+                if (num_blocks_y > kMaxGridYZ) {
+                  num_blocks_y = kMaxGridYZ;
+                }
                 if (ndim <= 3) {
                   dispatch_1_2_3(ndim, [&](auto dims_constant) {
                     auto kernel = cu::binary_g_nd<
@@ -307,7 +324,7 @@ void binary_op_gpu_inplace(
                     }
                     encoder.add_kernel_node(
                         kernel,
-                        {num_blocks_x, num_blocks_y},
+                        {num_blocks_x, num_blocks_y, num_blocks_z},
                         block_dims,
                         gpu_ptr<InType>(a),
                         gpu_ptr<InType>(b),
@@ -324,7 +341,7 @@ void binary_op_gpu_inplace(
                   }
                   encoder.add_kernel_node(
                       kernel,
-                      {num_blocks_x, num_blocks_y},
+                      {num_blocks_x, num_blocks_y, num_blocks_z},
                       block_dims,
                       gpu_ptr<InType>(a),
                       gpu_ptr<InType>(b),

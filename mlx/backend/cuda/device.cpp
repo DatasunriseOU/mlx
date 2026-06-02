@@ -250,6 +250,19 @@ void CommandEncoder::add_kernel_node_raw(
   bool use_cluster = !is_empty_dim(cluster_dim);
   assert(!use_cluster || device_.compute_capability_major() >= 9);
 
+  // Kernels requesting more than 48 KB of dynamic shared memory must opt in via
+  // cudaFuncSetAttribute, otherwise both the direct launch (cudaLaunchKernelExC)
+  // and the graph node creation (cudaGraphAddKernelNode) are rejected with
+  // "invalid argument" (observed on sm_121 / GB10). This is the single chokepoint
+  // for statically-compiled kernels, so opt in here. Fail loud if it cannot be
+  // set. cudaFuncSetAttribute is idempotent and cheap.
+  if (smem_bytes > 48 * 1024) {
+    CHECK_CUDA_ERROR(cudaFuncSetAttribute(
+        func,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes)));
+  }
+
   if (!use_cuda_graphs()) {
     node_count_++;
     cudaLaunchConfig_t config = {};
@@ -296,6 +309,15 @@ void CommandEncoder::add_kernel_node_raw(
     void** params) {
   bool use_cluster = !is_empty_dim(cluster_dim);
   assert(!use_cluster || device_.compute_capability_major() >= 9);
+
+  // Opt in for >48 KB dynamic shared memory (see the void* overload above).
+  // Required on sm_121 / GB10 for JIT-compiled kernels too.
+  if (smem_bytes > 48 * 1024) {
+    CHECK_CUDA_ERROR(cuFuncSetAttribute(
+        func,
+        CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        static_cast<int>(smem_bytes)));
+  }
 
   if (!use_cuda_graphs()) {
     node_count_++;

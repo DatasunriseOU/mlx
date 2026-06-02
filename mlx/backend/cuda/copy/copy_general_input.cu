@@ -20,8 +20,12 @@ __global__ void copy_g_nd(
     const __grid_constant__ cuda::std::array<int64_t, NDIM> strides) {
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
-  IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+  // The "rest" dimension is tiled across gridDim.y. For large tensors the launch
+  // folds gridDim.y overflow into gridDim.z (CUDA caps gridDim.y at 65535);
+  // reconstruct the global block-row. Reduces to blockIdx.y when gridDim.z == 1.
+  IdxT block_row =
+      grid.block_index().y + grid.block_index().z * grid.dim_blocks().y;
+  IdxT index_rest = block_row * block.dim_threads().y + block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -52,8 +56,10 @@ __global__ void copy_g(
     int ndim) {
   auto block = cg::this_thread_block();
   auto grid = cg::this_grid();
-  IdxT index_rest =
-      grid.block_index().y * block.dim_threads().y + block.thread_index().y;
+  // See copy_g_nd: fold gridDim.y overflow into gridDim.z for large tensors.
+  IdxT block_row =
+      grid.block_index().y + grid.block_index().z * grid.dim_blocks().y;
+  IdxT index_rest = block_row * block.dim_threads().y + block.thread_index().y;
   if (index_rest >= size_rest) {
     return;
   }
@@ -178,6 +184,13 @@ void copy_general_input(
             auto block_dims = get_block_dims(dim0, rest, 1);
             uint32_t num_blocks_x = cuda::ceil_div(dim0, block_dims.x);
             uint32_t num_blocks_y = cuda::ceil_div(rest, block_dims.y);
+            // CUDA caps gridDim.y at 65535; split into gridDim.y/z for large
+            // tensors. Kernels reconstruct row as blockIdx.y + blockIdx.z*gridDim.y.
+            constexpr uint32_t kMaxGridYZ = 65535;
+            uint32_t num_blocks_z = cuda::ceil_div(num_blocks_y, kMaxGridYZ);
+            if (num_blocks_y > kMaxGridYZ) {
+              num_blocks_y = kMaxGridYZ;
+            }
 
             if (ndim <= 3) {
               dispatch_1_2_3(ndim, [&](auto dims_constant) {
@@ -192,7 +205,7 @@ void copy_general_input(
                 }
                 encoder.add_kernel_node(
                     kernel,
-                    {num_blocks_x, num_blocks_y},
+                    {num_blocks_x, num_blocks_y, num_blocks_z},
                     block_dims,
                     in_ptr,
                     out_ptr,
@@ -209,7 +222,7 @@ void copy_general_input(
               }
               encoder.add_kernel_node(
                   kernel,
-                  {num_blocks_x, num_blocks_y},
+                  {num_blocks_x, num_blocks_y, num_blocks_z},
                   block_dims,
                   in_ptr,
                   out_ptr,

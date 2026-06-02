@@ -93,7 +93,11 @@ __global__ void gemv_batched(
     const __grid_constant__ Strides vec_batch_strides,
     int batch_ndim) {
   auto block = cg::this_thread_block();
-  auto batch_idx = block.group_index().y;
+  // The batch dimension is tiled across gridDim.y. When the batch count exceeds
+  // the CUDA gridDim.y limit (65535), the launch folds the overflow into
+  // gridDim.z; reconstruct the global batch index. For batch counts that fit in
+  // gridDim.y (gridDim.z == 1) this reduces to blockIdx.y.
+  auto batch_idx = block.group_index().y + block.group_index().z * gridDim.y;
   auto [vec_offset, mat_offset] = elem_to_loc(
       batch_idx,
       batch_shape.data(),
@@ -124,7 +128,12 @@ __global__ void gemv_gather(
     const __grid_constant__ Strides vec_index_strides,
     int index_batch_ndim) {
   auto block = cg::this_thread_block();
-  auto indices_idx = block.group_index().y;
+  // The gather (indices) dimension is tiled across gridDim.y. When the index
+  // count exceeds the CUDA gridDim.y limit (65535), the launch folds the
+  // overflow into gridDim.z; reconstruct the global index. For counts that fit
+  // in gridDim.y (gridDim.z == 1) this reduces to blockIdx.y.
+  auto indices_idx =
+      block.group_index().y + block.group_index().z * gridDim.y;
   uint32_t index_mat, index_vec;
   if (index_batch_ndim > 1) {
     auto [mat_idx_offset, vec_idx_offset] = elem_to_loc(
@@ -242,10 +251,16 @@ void gemv(
             rows,
             cols);
       } else {
+        // CUDA limits gridDim.y to 65535; split large batch counts across
+        // gridDim.y and gridDim.z. The kernel reconstructs the batch index as
+        // blockIdx.y + blockIdx.z * gridDim.y.
+        constexpr uint32_t kMaxGridYZ = 65535;
+        uint32_t batch_y = std::min(batch_count, kMaxGridYZ);
+        uint32_t batch_z = (batch_count + kMaxGridYZ - 1) / kMaxGridYZ;
         auto kernel = gemv_batched<DataType, rows_per_block, n_per_thread()>;
         encoder.add_kernel_node(
             kernel,
-            dim3{num_blocks_x, batch_count},
+            dim3{num_blocks_x, batch_y, batch_z},
             block_dims,
             mat,
             vec,
@@ -295,10 +310,16 @@ void gather_mv(
     }
 
     dispatch_n_per_thread(n_per_t, [&](auto n_per_thread) {
+      // CUDA limits gridDim.y to 65535; split large gather counts across
+      // gridDim.y and gridDim.z. The kernel reconstructs the index as
+      // blockIdx.y + blockIdx.z * gridDim.y.
+      constexpr uint32_t kMaxGridYZ = 65535;
+      uint32_t batch_y = std::min(batch_size, kMaxGridYZ);
+      uint32_t batch_z = (batch_size + kMaxGridYZ - 1) / kMaxGridYZ;
       auto kernel = gemv_gather<DataType, rows_per_block, n_per_thread()>;
       encoder.add_kernel_node(
           kernel,
-          dim3{num_blocks_x, batch_size},
+          dim3{num_blocks_x, batch_y, batch_z},
           block_dims,
           mat,
           vec,

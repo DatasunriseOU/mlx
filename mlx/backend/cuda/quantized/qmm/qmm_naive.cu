@@ -1,5 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
+#include "mlx/backend/cuda/cuda_utils.h"
 #include "mlx/backend/cuda/device/qmm_naive.cuh"
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/kernel_utils.cuh"
@@ -152,8 +153,22 @@ void qmm_naive(
   size_t smem_bytes =
       x.itemsize() * (cute::cosize(sA_layout) + cute::cosize(sB_layout));
 
+  // Kernels requesting more than 48 KB of dynamic shared memory must opt in via
+  // cuFuncSetAttribute, otherwise the launch is rejected with "invalid
+  // argument" (observed on sm_121 / GB10 where the larger tile_n=128 tiles can
+  // exceed 48 KB). Mirror the sm80 path's opt-in, but fail loud if it fails.
+  constexpr size_t kMaxDefaultSmem = 48 * 1024;
+  auto configure_kernel = [smem_bytes](CUfunction kernel) {
+    if (smem_bytes > kMaxDefaultSmem) {
+      CHECK_CUDA_ERROR(cuFuncSetAttribute(
+          kernel,
+          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+          static_cast<int>(smem_bytes)));
+    }
+  };
+
   encoder.add_kernel_node_ex(
-      mod.get_kernel(kernel_name),
+      mod.get_kernel(kernel_name, configure_kernel),
       num_blocks,
       block_dims,
       {},
