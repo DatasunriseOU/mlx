@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+#include <stdexcept>
+
 #include "mlx/backend/cuda/cuda.h"
 #include "mlx/fast.h"
 
@@ -16,6 +18,14 @@ int current_device() {
 }
 
 void synchronize_device() {}
+
+allocator::Buffer import_external_buffer(void*, size_t) {
+  throw std::runtime_error(
+      "[import_external_buffer] No CUDA back-end: cannot import a CUDA DLPack "
+      "buffer.");
+}
+
+void free_external_buffer(allocator::Buffer) {}
 
 } // namespace cu
 

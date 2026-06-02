@@ -1,6 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
 #include "mlx/backend/cuda/allocator.h"
+#include "mlx/backend/cuda/cuda.h"
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/utils.h"
 #include "mlx/backend/gpu/device_info.h"
@@ -397,6 +398,23 @@ CudaAllocator& allocator() {
 Buffer malloc_async(size_t size, CommandEncoder& encoder) {
   return allocator().malloc_async(
       size, encoder.device().cuda_device(), encoder.stream());
+}
+
+Buffer import_external_buffer(void* ptr, size_t nbytes) {
+  // Wrap a foreign CUDA device pointer in a CudaBuffer the MLX allocator can
+  // read back, WITHOUT ownership. device=-1 marks it unified-style so
+  // move_to_unified_memory()/raw_ptr() neither copy nor cudaFree the foreign
+  // allocation. This wrapper is intentionally NOT registered with the allocator
+  // (no active_memory_/cache accounting); it must be released by
+  // free_external_buffer(), never by allocator::free().
+  return Buffer{new CudaBuffer{ptr, nbytes, /* device = */ -1}};
+}
+
+void free_external_buffer(Buffer buffer) {
+  auto* buf = static_cast<CudaBuffer*>(buffer.ptr());
+  // Delete ONLY the wrapper struct. The underlying CUDA memory belongs to the
+  // foreign owner (DLPack capsule / torch tensor) and is freed by its deleter.
+  delete buf;
 }
 
 } // namespace cu

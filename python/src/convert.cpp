@@ -108,6 +108,10 @@ mx::array metal_dlpack_to_mlx(
     nb::ndarray<nb::ro, nb::c_contig> nd_array,
     std::optional<mx::Dtype> dtype);
 
+mx::array cuda_dlpack_to_mlx(
+    nb::ndarray<nb::ro, nb::c_contig> nd_array,
+    std::optional<mx::Dtype> dtype);
+
 mx::array nd_array_to_mlx(
     nb::ndarray<nb::ro, nb::c_contig> nd_array,
     std::optional<mx::Dtype> dtype,
@@ -126,6 +130,9 @@ mx::array nd_array_to_mlx(
     }
     case nb::device::metal::value:
       return metal_dlpack_to_mlx(std::move(nd_array), dtype);
+    case nb::device::cuda::value:
+    case nb::device::cuda_managed::value:
+      return cuda_dlpack_to_mlx(std::move(nd_array), dtype);
     default:
       throw std::invalid_argument("Unsupported DLPack device.");
   }
@@ -151,8 +158,28 @@ mx::array from_dlpack(nb::object v, std::optional<bool> copy) {
       return nd_array_to_mlx(std::move(nd), dtype);
     }
     case nb::device::cuda::value:
-    case nb::device::cuda_managed::value:
-      throw std::invalid_argument("CUDA DLPack import is not supported.");
+    case nb::device::cuda_managed::value: {
+      // Local fork patch (DatasunriseOU): import a CUDA DLPack capsule
+      // (kDLCUDA(2) / kDLCUDAManaged(13)) without a host roundtrip. The foreign
+      // device buffer is wrapped zero-copy and materialized into an MLX-owned
+      // GPU allocation (single device-side copy, no .cpu()/PCIe bounce). This is
+      // the symmetric import to our kDLCUDA export and lets torch/tvm-ffi CUDA
+      // kernel outputs flow back into MLX GPU-resident. copy==false is rejected:
+      // we cannot alias a foreign (non-MLX-allocated) CUDA buffer as an
+      // MLX-managed array without the device-side copy.
+      if (copy == false) {
+        throw std::invalid_argument(
+            "Cannot import a CUDA DLPack array without a copy: MLX cannot take "
+            "ownership of a foreign CUDA allocation; a device-side copy into an "
+            "MLX-managed buffer is required.");
+      }
+      std::optional<mx::Dtype> dtype;
+      if (copy == true) {
+        dtype = mlx_dtype_from_dlpack(
+            nd.dtype(), "Cannot convert CUDA DLPack array to mlx array.");
+      }
+      return cuda_dlpack_to_mlx(std::move(nd), dtype);
+    }
     default:
       throw std::invalid_argument("Unsupported DLPack device.");
   }
@@ -443,6 +470,83 @@ mx::array metal_dlpack_to_mlx(
         return metal_dlpack_to_mlx_contiguous<T>(owner, shape, type, dtype);
       },
       "Cannot convert Metal DLPack array to mlx array.");
+}
+
+template <typename T>
+mx::array cuda_dlpack_to_mlx_contiguous(
+    std::shared_ptr<nb::ndarray<nb::ro, nb::c_contig>> owner,
+    const mx::Shape& shape,
+    mx::Dtype type,
+    std::optional<mx::Dtype> dtype) {
+  auto itemsize = mx::size_of(type);
+  if (owner->itemsize() != itemsize) {
+    throw std::invalid_argument(
+        "Cannot convert CUDA DLPack dtype to mlx dtype.");
+  }
+
+  auto byte_offset = owner->byte_offset();
+  if (byte_offset % itemsize != 0) {
+    throw std::invalid_argument(
+        "CUDA DLPack byte offset is not aligned to dtype size.");
+  }
+
+  // Wrap the foreign CUDA device pointer in an MLX Buffer WITHOUT ownership.
+  // cu::import_external_buffer heap-allocates a CudaBuffer{ptr, nbytes, -1}
+  // wrapper so MLX reads the foreign pointer back correctly (the raw pointer
+  // cannot be handed to the Buffer ctor directly — MLX's CUDA Buffer wraps a
+  // CudaBuffer struct, not the data pointer). nbytes covers the full DLPack
+  // allocation including any byte_offset so the offset slice below stays in
+  // bounds.
+  auto nbytes = byte_offset + owner->nbytes();
+  auto buffer = mx::cu::import_external_buffer(owner->data_handle(), nbytes);
+
+  // The deleter releases BOTH the foreign owner (DLPack capsule / torch tensor,
+  // captured in `owner`) AND the MLX wrapper struct. It must NOT route through
+  // allocator::free (which would recycle the foreign pointer into MLX's pool).
+  auto out = mx::array(
+      buffer,
+      shape,
+      type,
+      [owner](mx::allocator::Buffer b) { mx::cu::free_external_buffer(b); });
+
+  auto offset = static_cast<int64_t>(byte_offset / itemsize);
+  if (offset != 0) {
+    auto flags = out.flags();
+    out.copy_shared_buffer(out, out.strides(), flags, out.data_size(), offset);
+  }
+
+  // Materialize into an MLX-owned GPU allocation with a single device-side copy
+  // (no host roundtrip). This is what recovers the kernel latency vs the prior
+  // .cpu().numpy() bounce, while leaving MLX in full control of the result's
+  // lifetime (the foreign torch buffer is only read during this copy, then the
+  // capsule owner is released). astype handles a requested dtype change.
+  auto result = (!dtype || *dtype == out.dtype())
+      ? mx::copy_to_new_buffer(out, mx::Device::gpu)
+      : mx::astype(out, *dtype, mx::Device::gpu);
+  result.eval();
+  result.wait();
+  result.detach();
+  return result;
+}
+
+mx::array cuda_dlpack_to_mlx(
+    nb::ndarray<nb::ro, nb::c_contig> nd_array,
+    std::optional<mx::Dtype> dtype) {
+  if (!mx::cu::is_available()) {
+    throw std::invalid_argument(
+        "Cannot import a CUDA DLPack array: the MLX CUDA backend is not "
+        "available in this build.");
+  }
+  auto owner =
+      std::make_shared<nb::ndarray<nb::ro, nb::c_contig>>(std::move(nd_array));
+  auto shape = get_shape(*owner);
+
+  return dispatch_dlpack_dtype(
+      owner->dtype(),
+      [&]<typename T>(mx::Dtype type) {
+        return cuda_dlpack_to_mlx_contiguous<T>(owner, shape, type, dtype);
+      },
+      "Cannot convert CUDA DLPack array to mlx array.");
 }
 
 template <typename T, typename U = T>
