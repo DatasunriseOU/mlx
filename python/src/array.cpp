@@ -525,12 +525,21 @@ void init_array(nb::module_& m) {
             // See
             // https://github.com/dmlc/dlpack/blob/5c210da409e7f1e51ddf445134a4376fdbd70d7d/include/dlpack/dlpack.h#L74
             if (mx::metal::is_available()) {
-              return nb::make_tuple(8, 0);
+              return nb::make_tuple(8, 0); // kDLMetal
             } else if (mx::cu::is_available()) {
-              return nb::make_tuple(13, 0);
+              // Local fork patch (DatasunriseOU): advertise kDLCUDA(=2) with the
+              // real device ordinal so the exported capsule is natively
+              // consumable by tvm-ffi / TileLang target="cuda". Upstream returns
+              // kDLCUDAManaged(13)/id 0, which TileLang's cuda runtime does not
+              // treat as a plain CUDA device and which loses the device index on
+              // multi-GPU. MLX CUDA buffers are cudaMallocManaged unified memory,
+              // which is directly addressable from CUDA kernels, so presenting
+              // them as kDLCUDA is valid.
+              int dev = mx::cu::current_device();
+              return nb::make_tuple(2, dev < 0 ? 0 : dev);
             } else {
               // CPU device
-              return nb::make_tuple(1, 0);
+              return nb::make_tuple(1, 0); // kDLCPU
             }
           })
       .def("__copy__", [](const mx::array& self) { return mx::array(self); })

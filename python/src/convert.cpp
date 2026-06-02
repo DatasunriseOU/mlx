@@ -266,7 +266,10 @@ nb::ndarray<nb::numpy> mlx_to_np_array(const mx::array& a) {
 }
 
 template <typename T>
-nb::ndarray<> mlx_to_dlpack_impl(mx::array a, int dl_device_type) {
+nb::ndarray<> mlx_to_dlpack_impl(
+    mx::array a,
+    int dl_device_type,
+    int dl_device_id) {
   void* data = nullptr;
   uint64_t byte_offset = 0;
   {
@@ -276,7 +279,26 @@ nb::ndarray<> mlx_to_dlpack_impl(mx::array a, int dl_device_type) {
     if (dl_device_type == nb::device::cpu::value) {
       a = host_accessible_array(std::move(a));
       data = a.data<T>();
+    } else if (
+        dl_device_type == nb::device::cuda::value ||
+        dl_device_type == nb::device::cuda_managed::value) {
+      // CUDA export: buffer().ptr() returns the opaque CudaBuffer* wrapper, not
+      // the real data pointer. buffer().raw_ptr() unwraps CudaBuffer.data AND
+      // moves the allocation to unified (managed) memory so the pointer is
+      // directly addressable from CUDA kernels. array::offset() is already a
+      // byte offset within that buffer (data<T>() adds it to a char*).
+      data = a.buffer().raw_ptr();
+      byte_offset = a.offset();
+      // Producer-side readiness contract: a.wait() drains MLX's stream, but for
+      // a foreign CUDA consumer we additionally fully synchronize the device so
+      // the (unified-memory) buffer is guaranteed coherent before the raw
+      // device pointer is handed off. MLX's CUDA backend has no public stream
+      // handle to thread through the versioned __dlpack__(stream=) arg, so a
+      // full device sync is the conservative correct choice.
+      mx::cu::synchronize_device();
     } else {
+      // Metal (and any other non-CPU, non-CUDA) backend: ptr() is the native
+      // buffer handle the consumer understands (e.g. MTLBuffer).
       data = a.buffer().ptr();
       byte_offset = a.offset();
     }
@@ -292,7 +314,7 @@ nb::ndarray<> mlx_to_dlpack_impl(mx::array a, int dl_device_type) {
       a.strides().data(),
       nb::dtype<T>(),
       dl_device_type,
-      0,
+      dl_device_id,
       '\0',
       byte_offset);
 }
@@ -300,17 +322,28 @@ nb::ndarray<> mlx_to_dlpack_impl(mx::array a, int dl_device_type) {
 nb::ndarray<> mlx_to_dlpack(
     const mx::array& a,
     std::optional<int> dl_device_type) {
+  // Local fork patch (DatasunriseOU): default the CUDA backend to kDLCUDA(2)
+  // (not kDLCUDAManaged(13)) so the exported capsule is natively consumable by
+  // tvm-ffi / TileLang target="cuda". MLX CUDA allocations are cudaMallocManaged
+  // unified memory which is directly addressable from CUDA kernels.
   int device_type = dl_device_type.value_or(
       mx::metal::is_available()
           ? nb::device::metal::value
-          : (mx::cu::is_available() ? nb::device::cuda_managed::value
+          : (mx::cu::is_available() ? nb::device::cuda::value
                                     : nb::device::cpu::value));
 
+  // Resolve the real device ordinal for CUDA exports (multi-GPU safe).
+  int device_id = 0;
   if (device_type == nb::device::cuda::value ||
       device_type == nb::device::cuda_managed::value) {
-    throw nb::buffer_error("CUDA DLPack export is not supported.");
-  }
-  if (device_type != nb::device::cpu::value &&
+    if (!mx::cu::is_available()) {
+      throw nb::buffer_error(
+          "CUDA DLPack export requested but the CUDA backend is unavailable.");
+    }
+    int dev = mx::cu::current_device();
+    device_id = dev < 0 ? 0 : dev;
+  } else if (
+      device_type != nb::device::cpu::value &&
       device_type != nb::device::metal::value) {
     throw nb::buffer_error(
         "Cannot export mlx array to requested DLPack device.");
@@ -321,33 +354,33 @@ nb::ndarray<> mlx_to_dlpack(
 
   switch (a.dtype()) {
     case mx::bool_:
-      return mlx_to_dlpack_impl<bool>(a, device_type);
+      return mlx_to_dlpack_impl<bool>(a, device_type, device_id);
     case mx::uint8:
-      return mlx_to_dlpack_impl<uint8_t>(a, device_type);
+      return mlx_to_dlpack_impl<uint8_t>(a, device_type, device_id);
     case mx::uint16:
-      return mlx_to_dlpack_impl<uint16_t>(a, device_type);
+      return mlx_to_dlpack_impl<uint16_t>(a, device_type, device_id);
     case mx::uint32:
-      return mlx_to_dlpack_impl<uint32_t>(a, device_type);
+      return mlx_to_dlpack_impl<uint32_t>(a, device_type, device_id);
     case mx::uint64:
-      return mlx_to_dlpack_impl<uint64_t>(a, device_type);
+      return mlx_to_dlpack_impl<uint64_t>(a, device_type, device_id);
     case mx::int8:
-      return mlx_to_dlpack_impl<int8_t>(a, device_type);
+      return mlx_to_dlpack_impl<int8_t>(a, device_type, device_id);
     case mx::int16:
-      return mlx_to_dlpack_impl<int16_t>(a, device_type);
+      return mlx_to_dlpack_impl<int16_t>(a, device_type, device_id);
     case mx::int32:
-      return mlx_to_dlpack_impl<int32_t>(a, device_type);
+      return mlx_to_dlpack_impl<int32_t>(a, device_type, device_id);
     case mx::int64:
-      return mlx_to_dlpack_impl<int64_t>(a, device_type);
+      return mlx_to_dlpack_impl<int64_t>(a, device_type, device_id);
     case mx::float16:
-      return mlx_to_dlpack_impl<mx::float16_t>(a, device_type);
+      return mlx_to_dlpack_impl<mx::float16_t>(a, device_type, device_id);
     case mx::bfloat16:
-      return mlx_to_dlpack_impl<mx::bfloat16_t>(a, device_type);
+      return mlx_to_dlpack_impl<mx::bfloat16_t>(a, device_type, device_id);
     case mx::float32:
-      return mlx_to_dlpack_impl<float>(a, device_type);
+      return mlx_to_dlpack_impl<float>(a, device_type, device_id);
     case mx::float64:
-      return mlx_to_dlpack_impl<double>(a, device_type);
+      return mlx_to_dlpack_impl<double>(a, device_type, device_id);
     case mx::complex64:
-      return mlx_to_dlpack_impl<std::complex<float>>(a, device_type);
+      return mlx_to_dlpack_impl<std::complex<float>>(a, device_type, device_id);
     default:
       throw nb::buffer_error("Cannot export mlx array with unsupported dtype.");
   }

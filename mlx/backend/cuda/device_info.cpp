@@ -227,6 +227,16 @@ bool is_available() {
   return true;
 }
 
+int current_device() {
+  int device = -1;
+  cudaGetDevice(&device);
+  return device;
+}
+
+void synchronize_device() {
+  cudaDeviceSynchronize();
+}
+
 } // namespace cu
 
 } // namespace mlx::core

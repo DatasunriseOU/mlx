@@ -11,6 +11,12 @@ bool is_available() {
   return false;
 }
 
+int current_device() {
+  return -1;
+}
+
+void synchronize_device() {}
+
 } // namespace cu
 
 namespace fast {
