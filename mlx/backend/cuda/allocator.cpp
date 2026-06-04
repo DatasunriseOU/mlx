@@ -177,6 +177,24 @@ CudaAllocator::CudaAllocator()
     if (d.memory_pools()) {
       free_streams_[i] = CudaStream(d);
       CHECK_CUDA_ERROR(cudaDeviceGetDefaultMemPool(&mem_pools_[i], i));
+      // lever dlpack-fix (DatasunriseOU): bound the stream-ordered mempool's
+      // release threshold so cudaFreeAsync returns reserved-but-idle memory to
+      // the OS instead of retaining ALL of it (the CUDA default is UINT64_MAX =
+      // retain everything). On the single GB10 117 GB unified part this MLX pool
+      // co-resides with torch/TE's own cudaMallocAsync pool during the fp8
+      // backward; without a release threshold the COMBINED reserved set exceeds
+      // physical memory and MLX's next cudaMallocAsync OOMs at the DLPack bridge
+      // (docs/RELAX-GRAPH-VS-MEGATRON.md §21). Setting the threshold to 0 makes
+      // this pool give memory back so the two pools coexist. The Python ctypes
+      // shim (cppmega.mlx _cuda_zerocopy.trim_cuda_mempool) ALSO trims the same
+      // default pool at the bridge boundary; doing it here makes it airtight even
+      // when MLX is driven without that shim. RULE #1: this only frees idle
+      // reserved memory — it never changes results.
+      uint64_t release_threshold = 0;
+      CHECK_CUDA_ERROR(cudaMemPoolSetAttribute(
+          mem_pools_[i],
+          cudaMemPoolAttrReleaseThreshold,
+          &release_threshold));
     }
   }
 }
