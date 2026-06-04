@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -214,6 +215,33 @@ CudaAllocator::malloc_async(size_t size, int device, cudaStream_t stream) {
   }
 
   if (size <= small_block_size || stream == nullptr) {
+    device = -1;
+  }
+
+  // SECONDARY (§22) export-doubling fix: when MLX arrays cross the MLX<->torch
+  // DLPack bridge, the native CUDA export (convert.cpp mlx_to_dlpack_impl ->
+  // buffer().raw_ptr() -> move_to_unified_memory) converts a real DEVICE-pool
+  // buffer to a managed buffer by allocating a SECOND full-size cudaMallocManaged
+  // buffer + memcpy + freeing the original — a transient per-tensor DOUBLING of the
+  // allocation. On the single GB10 unified part this transient doubling, multiplied
+  // across every operand crossing the bridge in the fp8 backward, pushes the
+  // combined reservation over the 117 GB physical pool and OOMs.
+  //
+  // When MLX_CUDA_BRIDGE_UNIFIED is set we allocate ALL device buffers as unified
+  // (device = -1, i.e. cudaMallocManaged) up front, so move_to_unified_memory
+  // early-returns (buf.device == -1) and the bridge export is a pure no-op — NO
+  // doubling. On GB10/managed parts unified memory is fully device-addressable, so
+  // this is correctness-neutral (it changes only WHERE the buffer lives, never the
+  // data). It trades the per-tensor double for living in managed memory throughout;
+  // that is the right trade on a unified part feeding the zero-copy fp8 bridge.
+  // RULE #1: this never host-copies or degrades results — managed memory is the same
+  // bytes, device-resident. Default OFF (env-gated) so the normal device-pool path
+  // is byte-for-byte unchanged unless the bridge workload opts in.
+  static const bool bridge_unified = []() {
+    const char* v = std::getenv("MLX_CUDA_BRIDGE_UNIFIED");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+  }();
+  if (bridge_unified && supports_managed_memory()) {
     device = -1;
   }
 
